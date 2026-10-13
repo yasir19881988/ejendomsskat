@@ -1,36 +1,76 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# ejendomsskat.dk
 
-## Getting Started
+Platform til at tjekke danske boligejeres offentlige ejendomsvurdering mod reelle salgspriser.
 
-First, run the development server:
+## Funktioner
+
+- **Adresse-søgning**: Autocomplete via DAR GraphQL
+- **Ejendomsprofil**: BBR-data (areal, byggeår), OIS-vurdering, seneste salgspris
+- **Nabotjek**: Sammenligning med solgte ejendomme i området
+- **Indsigelses-indikator**: Viser potentiale for indsigelse mod vurderingen
+
+## Teknologi
+
+- **Frontend**: Next.js 16 (App Router, TypeScript), Tailwind CSS
+- **Backend**: Next.js API Routes
+- **Datakilder**:
+  - DAR GraphQL (adresser)
+  - BBR GraphQL (bygningsdata)
+  - OIS.dk (ejendomsvurdering og salg)
+  - Datafordeleren (Tinglysning - kræver godkendelse)
+
+## Kom i gang
+
+### 1. Installer dependencies
+
+```bash
+npm install
+```
+
+### 2. Konfigurer miljøvariabler
+
+Opret `.env.local` med dine Datafordeleren credentials:
+
+```env
+DATAFORDELER_API_KEY=din-api-key-her
+DATAFORDELER_CLIENT_ID=din-client-id-her
+DATAFORDELER_CLIENT_SECRET=din-shared-secret-her
+```
+
+### 3. Start udviklingsserver
 
 ```bash
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Åbn [http://localhost:3000](http://localhost:3000) i browseren.
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+## Deploy til Vercel
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+1. Push projektet til GitHub
+2. Opret konto på [Vercel](https://vercel.com)
+3. Importer projektet fra GitHub
+4. Tilføj miljøvariabler i Vercel dashboard:
+   - `DATAFORDELER_API_KEY`
+   - `DATAFORDELER_CLIENT_ID`
+   - `DATAFORDELER_CLIENT_SECRET`
+5. Deploy
 
-## Learn More
+## API Endpoints
 
-To learn more about Next.js, take a look at the following resources:
+| Endpoint | Beskrivelse |
+|----------|-------------|
+| `GET /api/adresse?q=...` | Autocomplete adresse-søgning |
+| `POST /api/ejendom` | Hent samlet ejendomsdata |
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+## Bemærkninger
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+- **DAWA er lukket** (1. oktober 2026) - projektet bruger DAR GraphQL i stedet
+- **BBR Light er lukket** (3. april 2024) - projektet bruger BBR GraphQL
+- **Tinglysning** kræver virksomhedsregistrering og ansøgning hos Datafordeleren
+- **OIS.dk** er et åbent API uden krav om registrering
 
-## Deploy on Vercel
+## Licens
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+Privat projekt - alle rettigheder forbeholdes.
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
