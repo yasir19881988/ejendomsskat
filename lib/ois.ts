@@ -97,6 +97,133 @@ class OisClient {
   }
 
   /**
+   * Hent ejendomsstruktur fra GetPropertyFromBFE (SFE, EJL-intervaller).
+   */
+  async hentEjendomStruktur(bfe: string): Promise<{ bfe: number; sfeBfe: number | null; ejlBfe: number | null; ejlInterval: string } | null> {
+    const cacheKey = `ois:struktur:${bfe}`;
+    const cached = cache.get<{ bfe: number; sfeBfe: number | null; ejlBfe: number | null; ejlInterval: string }>(cacheKey);
+    if (cached) return cached;
+
+    try {
+      const { data } = await this.http.get<Record<string, unknown>>(
+        `/api/property/GetPropertyFromBFE?bfe=${encodeURIComponent(bfe)}`
+      );
+
+      const result = {
+        bfe: Number(data.bfe ?? bfe),
+        sfeBfe: data.sfe_bfe ? Number(data.sfe_bfe) : null,
+        ejlBfe: data.ejl_bfe ? Number(data.ejl_bfe) : null,
+        ejlInterval: String(data.ejlBfes ?? ''),
+      };
+
+      cache.set(cacheKey, result, 60 * 60 * 1000);
+      return result;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Find den korrekte EJL-BFE for en adresse inden for et SFE-interval.
+   * Matcher adressebetegnelse mod hver EJL's beliggenhed.
+   */
+  async findEjlBfeForAdresse(sfeBfe: string, adresseTekst: string): Promise<string | null> {
+    const struktur = await this.hentEjendomStruktur(sfeBfe);
+    if (!struktur?.ejlInterval) return null;
+
+    // Parse interval "123454-123465"
+    const match = struktur.ejlInterval.match(/^(\d+)-(\d+)$/);
+    if (!match) return null;
+
+    const start = parseInt(match[1], 10);
+    const slut = parseInt(match[2], 10);
+    if (slut - start > 200) return null; // for stort interval
+
+    const normaliseret = adresseTekst.toLowerCase();
+
+    // Søg i batches for hastighed
+    const bfeListe: string[] = [];
+    for (let i = start; i <= slut; i++) bfeListe.push(String(i));
+
+    const batchSize = 10;
+    for (let i = 0; i < bfeListe.length; i += batchSize) {
+      const batch = bfeListe.slice(i, i + batchSize);
+      const resultater = await Promise.all(
+        batch.map(async (bfe) => {
+          const info = await this.hentGenerelInfo(bfe);
+          if (!info) return null;
+          const ejlInfo = info.GeneralInfoEJL as Record<string, unknown> | undefined;
+          const sfeInfo = info.GeneralInfoSFE as Record<string, unknown> | undefined;
+          // OIS staver feltet "beligenhed" (med én g)
+          const beliggenhed = String(ejlInfo?.beligenhed ?? sfeInfo?.beligenhed ?? '').toLowerCase();
+          // Match på fuld adresse (vej + husnr + evt. etage/dør)
+          if (beliggenhed && this.adresseMatch(normaliseret, beliggenhed)) {
+            return bfe;
+          }
+          return null;
+        })
+      );
+      const fundet = resultater.find((r) => r !== null);
+      if (fundet) return fundet;
+    }
+
+    return null;
+  }
+
+  /**
+   * Sammenlign to adressetekster (tolerant mod etage/dør-forskelle).
+   */
+  private adresseMatch(soegt: string, fundet: string): boolean {
+    // Udtræk vejnavn + husnr fra begge
+    const parse = (s: string) => {
+      const m = s.match(/^(.+?)\s+(\d+[A-Za-z]?)/);
+      return m ? { vej: m[1].toLowerCase().trim(), nr: m[2].toLowerCase() } : null;
+    };
+    const a = parse(soegt);
+    const b = parse(fundet);
+    if (!a || !b) return false;
+    return a.vej === b.vej && a.nr === b.nr;
+  }
+
+  /**
+   * Søg efter adresser i OIS.
+   * OIS har en intern søgefunktion der returnerer adresser med BFE-numre.
+   */
+  async soegAdresse(query: string, limit = 10): Promise<OisAdresse[]> {
+    try {
+      // OIS's søge-endpoint returnerer HTML, ikke JSON
+      // Vi bruger deres Property/Search og parser resultatet
+      const { data } = await this.http.get<string>(
+        `/Property/Search?searchText=${encodeURIComponent(query)}`,
+        {
+          headers: {
+            Accept: 'text/html',
+          },
+        }
+      );
+
+      // OIS returnerer en React-app, så vi kan ikke parse HTML direkte
+      // I stedet bruger vi deres API til at hente BFE fra adresse
+      // For nu returnerer vi en tom liste - implementeres når vi finder deres søge-API
+      console.warn('OIS adresse-søgning ikke implementeret endnu');
+      return [];
+    } catch {
+      return [];
+    }
+  }
+
+  /**
+   * Hent BFE-nummer fra adresse-tekst.
+   * Bruger OIS's GetBFEFromAddressId hvis vi har et addressId.
+   */
+  async hentBfeFraAdresseTekst(adresseTekst: string): Promise<string | null> {
+    // OIS har ikke en direkte adresse-til-BFE API
+    // Vi skal først finde addressId via deres søgefunktion
+    // For nu returnerer vi null - implementeres når vi finder deres søge-API
+    return null;
+  }
+
+  /**
    * Hent fuld ejendomsdata inkl. vurdering og salg via BFE-nummer.
    * Caches resultatet i 1 time da vurderingsdata sjældent ændrer sig.
    */
@@ -236,7 +363,8 @@ class OisClient {
 
           const sfeInfo = info.GeneralInfoSFE as Record<string, unknown> | undefined;
           const ejlInfo = info.GeneralInfoEJL as Record<string, unknown> | undefined;
-          const beliggenhed = String(sfeInfo?.beliggenhed ?? ejlInfo?.beliggenhed ?? '').toLowerCase();
+          // OIS staver feltet "beligenhed" (med én g)
+          const beliggenhed = String(sfeInfo?.beligenhed ?? ejlInfo?.beligenhed ?? '').toLowerCase();
 
           if (beliggenhed.includes(normaliseretAdresse) || normaliseretAdresse.includes(beliggenhed)) {
             return String(bfe);

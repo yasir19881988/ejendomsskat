@@ -10,11 +10,27 @@ export async function GET(request: NextRequest) {
     return NextResponse.json({ forslag: [] });
   }
 
+  // Fjern postnummer fra query hvis det findes (f.eks. "Hjallesevej 5240" → "Hjallesevej")
+  // DAR's startsWith filter matcher ikke når postnummer er inkluderet
+  const queryUdenPostnr = query.replace(/\s+\d{4}$/, '').trim();
+
   try {
-    const resultater = await dawaClient.autocompleteAdresse(query, limit);
+    const resultater = await dawaClient.autocompleteAdresse(queryUdenPostnr, limit * 2); // Hent flere for at kunne deduplikere
+
+    // Dedupliker på forslagstekst (samme adresse kan have flere varianter)
+    const unikke = new Map<string, typeof resultater[0]>();
+    for (const r of resultater) {
+      const key = r.forslagstekst.toLowerCase().trim();
+      if (!unikke.has(key)) {
+        unikke.set(key, r);
+      }
+    }
+
+    // Begræns til ønsket antal
+    const deduplikeret = Array.from(unikke.values()).slice(0, limit);
 
     return NextResponse.json({
-      forslag: resultater.map((r) => ({
+      forslag: deduplikeret.map((r) => ({
         id: r.data.id,
         tekst: r.tekst,
         forslagstekst: r.forslagstekst,

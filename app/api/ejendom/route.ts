@@ -1,20 +1,26 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { hentEjendomBasis, EjendomBasis } from '@/lib/dawa';
-import { datafordelerenClient, beregnNabosammenligning, SalgsReference } from '@/lib/datafordeleren';
-import { oisClient, parseOisVurdering } from '@/lib/ois';
+import { oisClient, parseOisVurdering, OisEjendomData } from '@/lib/ois';
+import { hentEjendomBasis } from '@/lib/dawa';
+import { beregnNabosammenligning, SalgsReference } from '@/lib/datafordeleren';
 
 // ---------- Response Types ----------
 
 export interface EjendomResponse {
   success: boolean;
   data?: {
-    basis: EjendomBasis;
+    basis: {
+      adresseId: string;
+      adresseTekst: string;
+      bfeNummer: string | null;
+      boligArealM2: number | null;
+      byggeaar: number | null;
+    };
     vurdering: {
       ejendomsvaerdi2024: number | null;
       ejendomsvaerdi2025: number | null;
       grundvaerdi2024: number | null;
       grundvaerdi2025: number | null;
-      beskatningsgrundlag2025: number | null; // 80% af ejendomsværdi efter 20% forsigtighedsfradrag
+      beskatningsgrundlag2025: number | null;
     };
     senesteSalg: {
       koebesum: number | null;
@@ -32,8 +38,7 @@ export interface EjendomResponse {
   meta: {
     adresseId: string;
     hentet: string;
-    dawaStatus: 'ok' | 'lukket' | 'fejl';
-    datafordelerStatus: 'ok' | 'mangler-auth' | 'fejl';
+    oisStatus: 'ok' | 'fejl';
   };
 }
 
@@ -44,7 +49,7 @@ export async function POST(request: NextRequest) {
     const body = await request.json();
     const { adresseId, bfeNummer: direkteBfe } = body as { adresseId?: string; bfeNummer?: string };
 
-    // Hvis der er indtastet BFE direkte, brug det i stedet for adresse-opslag
+    // Hvis der er indtastet BFE direkte, brug det
     if (direkteBfe && /^\d+$/.test(direkteBfe)) {
       return await hentEjendomFraBfe(direkteBfe);
     }
@@ -57,154 +62,162 @@ export async function POST(request: NextRequest) {
           meta: {
             adresseId: '',
             hentet: new Date().toISOString(),
-            dawaStatus: 'fejl',
-            datafordelerStatus: 'fejl',
+            oisStatus: 'fejl',
           },
         },
         { status: 400 }
       );
     }
 
-    // 1. Hent basisdata fra DAWA (adresse + BBR)
+    // Hent data fra DAR (adresse) og derefter OIS via BFE
     const basis = await hentEjendomBasis(adresseId);
 
     if (!basis) {
       return NextResponse.json<EjendomResponse>(
         {
           success: false,
-          error: 'Kunne ikke hente adresse fra DAWA. Servicen kan være lukket eller adressen findes ikke.',
+          error: 'Kunne ikke finde adressen. Prøv igen eller brug BFE-nummer.',
           meta: {
             adresseId,
             hentet: new Date().toISOString(),
-            dawaStatus: 'lukket',
-            datafordelerStatus: 'fejl',
+            oisStatus: 'fejl',
           },
         },
         { status: 404 }
       );
     }
 
-    // 2. Hent tinglyst købesum fra Datafordeleren (hvis BFE-nummer findes)
-    let senesteSalg = {
-      koebesum: null as number | null,
-      dato: null as string | null,
-      m2Pris: null as number | null,
-    };
-    let datafordelerStatus: 'ok' | 'mangler-auth' | 'fejl' = 'mangler-auth';
-
+    // Hvis vi har BFE fra adresse-opslaget, brug det
     if (basis.bfeNummer) {
-      try {
-        const tinglysninger = await datafordelerenClient.hentTinglystKoebesum(basis.bfeNummer);
-        datafordelerStatus = 'ok';
+      return await hentEjendomFraBfeMedBasis(basis.bfeNummer, basis);
+    }
 
-        if (tinglysninger.length > 0) {
-          const seneste = tinglysninger.sort((a, b) => {
-            const datoA = a.overfoerselsdato ?? '';
-            const datoB = b.overfoerselsdato ?? '';
-            return datoB.localeCompare(datoA);
-          })[0];
+    // Ellers returner basis-info uden vurdering
+    return NextResponse.json<EjendomResponse>({
+      success: true,
+      data: {
+        basis: {
+          adresseId: basis.adresseId,
+          adresseTekst: basis.adresseTekst,
+          bfeNummer: null,
+          boligArealM2: basis.boligArealM2,
+          byggeaar: basis.byggeaar,
+        },
+        vurdering: {
+          ejendomsvaerdi2024: null,
+          ejendomsvaerdi2025: null,
+          grundvaerdi2024: null,
+          grundvaerdi2025: null,
+          beskatningsgrundlag2025: null,
+        },
+        senesteSalg: { koebesum: null, dato: null, m2Pris: null },
+        nabosammenligning: null,
+        indsigelse: {
+          potentiale: false,
+          procentOverMarked: null,
+          begrundelse: 'BFE-nummer ikke fundet for denne adresse. Indtast BFE manuelt for fuld analyse.',
+        },
+      },
+      meta: {
+        adresseId,
+        hentet: new Date().toISOString(),
+        oisStatus: 'ok',
+      },
+    });
 
-          senesteSalg = {
-            koebesum: seneste.beloeb ?? null,
-            dato: seneste.overfoerselsdato ?? null,
-            m2Pris:
-              seneste.beloeb && basis.boligArealM2
-                ? Math.round(seneste.beloeb / basis.boligArealM2)
-                : null,
-          };
+  } catch (error) {
+    console.error('Uventet fejl i /api/ejendom:', error);
+    return NextResponse.json<EjendomResponse>(
+      {
+        success: false,
+        error: 'Intern serverfejl',
+        meta: {
+          adresseId: '',
+          hentet: new Date().toISOString(),
+          oisStatus: 'fejl',
+        },
+      },
+      { status: 500 }
+    );
+  }
+}
+
+// ---------- Hjælpefunktion: Hent ejendom fra BFE med basis-data ----------
+
+async function hentEjendomFraBfeMedBasis(bfeNummer: string, basis: { adresseId: string; adresseTekst: string; boligArealM2: number | null; byggeaar: number | null }): Promise<NextResponse> {
+  try {
+    let oisData = await oisClient.hentEjendomData(bfeNummer);
+    let aktivBfe = bfeNummer;
+
+    // Hvis SFE-BFE'et ikke har vurderingsdata, find den korrekte EJL-BFE via adresse-match
+    if (!oisData || (!oisData.ejendomsvaerdi && !oisData.senesteSalgKoebesum)) {
+      const ejlBfe = await oisClient.findEjlBfeForAdresse(bfeNummer, basis.adresseTekst);
+      if (ejlBfe) {
+        const ejlData = await oisClient.hentEjendomData(ejlBfe);
+        if (ejlData) {
+          oisData = ejlData;
+          aktivBfe = ejlBfe;
         }
-      } catch (error) {
-        console.error('Fejl ved hentning af tinglyst købesum:', error);
-        datafordelerStatus = 'fejl';
       }
     }
 
-    // 3. Hent offentlig ejendomsværdi fra OIS.dk (Vurderingsstyrelsens data via OIS)
-    let vurdering = {
-      ejendomsvaerdi2024: null as number | null,
-      ejendomsvaerdi2025: null as number | null,
-      grundvaerdi2024: null as number | null,
-      grundvaerdi2025: null as number | null,
-      beskatningsgrundlag2025: null as number | null,
-    };
-
-    if (basis.bfeNummer) {
-      try {
-        const oisData = await oisClient.hentEjendomData(basis.bfeNummer);
-        if (oisData) {
-          const parsed = parseOisVurdering(oisData);
-          vurdering = {
-            ejendomsvaerdi2024: parsed.ejendomsvaerdi2024,
-            ejendomsvaerdi2025: parsed.ejendomsvaerdi2025,
-            grundvaerdi2024: parsed.grundvaerdi2024,
-            grundvaerdi2025: parsed.grundvaerdi2025,
-            beskatningsgrundlag2025: parsed.beskatningsgrundlag2025,
-          };
-
-          // Hvis OIS har seneste salg, brug det som fallback hvis Datafordeleren fejlede
-          if (!senesteSalg.koebesum && oisData.senesteSalgKoebesum) {
-            senesteSalg = {
-              koebesum: oisData.senesteSalgKoebesum,
-              dato: oisData.senesteSalgDato,
-              m2Pris: oisData.senesteSalgKoebesum && basis.boligArealM2
-                ? Math.round(oisData.senesteSalgKoebesum / basis.boligArealM2)
-                : null,
-            };
-          }
-        }
-      } catch (error) {
-        console.error('Fejl ved hentning af OIS-vurdering:', error);
-      }
+    if (!oisData) {
+      return NextResponse.json<EjendomResponse>(
+        {
+          success: false,
+          error: 'Kunne ikke hente data for BFE-nummer',
+          meta: { adresseId: bfeNummer, hentet: new Date().toISOString(), oisStatus: 'fejl' },
+        },
+        { status: 404 }
+      );
     }
 
-    // 4. Beregn nabosammenligning via OIS (kræver ikke Tinglysning-godkendelse)
+    const vurdering = parseOisVurdering(oisData);
+
+    const senesteSalg = {
+      koebesum: oisData.senesteSalgKoebesum,
+      dato: oisData.senesteSalgDato,
+      m2Pris: oisData.senesteSalgKoebesum && basis.boligArealM2
+        ? Math.round(oisData.senesteSalgKoebesum / basis.boligArealM2)
+        : null,
+    };
+
+    // Beregn nabotjek
     let nabosammenligning: ReturnType<typeof beregnNabosammenligning> | null = null;
+    const bfeListe = oisClient.genererBfeListe(aktivBfe, 40);
+    const oisDataListe = await oisClient.hentSalgsdataForBfeListe(bfeListe);
 
-    if (basis.boligArealM2 && basis.bfeNummer) {
-      try {
-        // Generer liste af BFE-numre i området (forløbende sekvens)
-        // Brug 40 BFE'er for at få nok data efter filtrering
-        const bfeListe = oisClient.genererBfeListe(basis.bfeNummer, 40);
+    const toAarSiden = new Date();
+    toAarSiden.setFullYear(toAarSiden.getFullYear() - 2);
 
-        // Hent salgsdata for alle BFE-numre
-        const oisDataListe = await oisClient.hentSalgsdataForBfeListe(bfeListe);
+    const referencer: SalgsReference[] = oisDataListe
+      .filter((d) => {
+        if (!d.senesteSalgKoebesum || d.senesteSalgKoebesum <= 0) return false;
+        if (!d.senesteSalgDato) return false;
+        const salgsDato = new Date(d.senesteSalgDato);
+        return salgsDato >= toAarSiden;
+      })
+      .map((d) => ({
+        adresse: `BFE ${d.bfeNummer}`,
+        bfeNummer: d.bfeNummer,
+        koebesum: d.senesteSalgKoebesum!,
+        salgsdato: d.senesteSalgDato ?? '',
+        boligArealM2: basis.boligArealM2 ?? 0,
+        m2Pris: basis.boligArealM2 ? d.senesteSalgKoebesum! / basis.boligArealM2 : 0,
+      }));
 
-        // Filtrer ejendomme med både salgspris og areal, og kun seneste 2 år
-        const toAarSiden = new Date();
-        toAarSiden.setFullYear(toAarSiden.getFullYear() - 2);
+    nabosammenligning = beregnNabosammenligning(referencer);
 
-        const referencer: SalgsReference[] = oisDataListe
-          .filter((d) => {
-            if (!d.senesteSalgKoebesum || d.senesteSalgKoebesum <= 0) return false;
-            if (!d.senesteSalgDato) return false;
-            const salgsDato = new Date(d.senesteSalgDato);
-            return salgsDato >= toAarSiden;
-          })
-          .map((d) => ({
-            adresse: `BFE ${d.bfeNummer}`,
-            bfeNummer: d.bfeNummer,
-            koebesum: d.senesteSalgKoebesum!,
-            salgsdato: d.senesteSalgDato ?? '',
-            boligArealM2: basis.boligArealM2!, // Vi bruger basis-areal som reference
-            m2Pris: d.senesteSalgKoebesum! / basis.boligArealM2!,
-          }));
-
-        nabosammenligning = beregnNabosammenligning(referencer);
-      } catch (error) {
-        console.error('Fejl ved nabosammenligning:', error);
-      }
-    }
-
-    // 5. Beregn indsigelses-indikator
+    // Beregn indsigelse
     let indsigelse = {
       potentiale: false,
       procentOverMarked: null as number | null,
       begrundelse: 'Manglende data til sammenligning',
     };
 
-    if (vurdering.ejendomsvaerdi2025 && nabosammenligning && nabosammenligning.antalReferencer > 0) {
+    if (vurdering.ejendomsvaerdi2025 && nabosammenligning && nabosammenligning.antalReferencer > 0 && basis.boligArealM2) {
       const markedM2Pris = nabosammenligning.gennemsnitM2Pris;
-      const vurderingM2Pris = vurdering.ejendomsvaerdi2025 / (basis.boligArealM2 ?? 1);
+      const vurderingM2Pris = vurdering.ejendomsvaerdi2025 / basis.boligArealM2;
       const procentOver = ((vurderingM2Pris - markedM2Pris) / markedM2Pris) * 100;
 
       indsigelse = {
@@ -220,47 +233,63 @@ export async function POST(request: NextRequest) {
     const response: EjendomResponse = {
       success: true,
       data: {
-        basis,
+        basis: {
+          adresseId: basis.adresseId,
+          adresseTekst: basis.adresseTekst,
+          bfeNummer: aktivBfe,
+          boligArealM2: basis.boligArealM2,
+          byggeaar: basis.byggeaar,
+        },
         vurdering,
         senesteSalg,
         nabosammenligning,
         indsigelse,
       },
       meta: {
-        adresseId,
+        adresseId: basis.adresseId,
         hentet: new Date().toISOString(),
-        dawaStatus: 'ok',
-        datafordelerStatus,
+        oisStatus: 'ok',
       },
     };
 
     return NextResponse.json(response);
   } catch (error) {
-    console.error('Uventet fejl i /api/ejendom:', error);
+    console.error('Fejl ved hentning af ejendom fra BFE:', error);
     return NextResponse.json<EjendomResponse>(
       {
         success: false,
-        error: 'Intern serverfejl',
-        meta: {
-          adresseId: '',
-          hentet: new Date().toISOString(),
-          dawaStatus: 'fejl',
-          datafordelerStatus: 'fejl',
-        },
+        error: 'Kunne ikke hente ejendomsdata fra OIS',
+        meta: { adresseId: bfeNummer, hentet: new Date().toISOString(), oisStatus: 'fejl' },
       },
       { status: 500 }
     );
   }
 }
 
-// ---------- Hjælpefunktion: Hent ejendom direkte fra BFE ----------
+// ---------- Hjælpefunktion: Hent ejendom fra BFE ----------
 
 async function hentEjendomFraBfe(bfeNummer: string): Promise<NextResponse> {
   try {
     // Hent data fra OIS
     const oisData = await oisClient.hentEjendomData(bfeNummer);
-    const generelInfo = await oisClient.hentGenerelInfo(bfeNummer);
 
+    if (!oisData) {
+      return NextResponse.json<EjendomResponse>(
+        {
+          success: false,
+          error: 'Kunne ikke hente data for BFE-nummer',
+          meta: {
+            adresseId: bfeNummer,
+            hentet: new Date().toISOString(),
+            oisStatus: 'fejl',
+          },
+        },
+        { status: 404 }
+      );
+    }
+
+    // Hent generel info for at få adresse
+    const generelInfo = await oisClient.hentGenerelInfo(bfeNummer);
     const sfeInfo = generelInfo?.GeneralInfoSFE as Record<string, unknown> | undefined;
     const ejlInfo = generelInfo?.GeneralInfoEJL as Record<string, unknown> | undefined;
     const beliggenhed = String(sfeInfo?.beliggenhed ?? ejlInfo?.beliggenhed ?? `BFE ${bfeNummer}`);
@@ -270,8 +299,8 @@ async function hentEjendomFraBfe(bfeNummer: string): Promise<NextResponse> {
 
     // Parse seneste salg
     const senesteSalg = {
-      koebesum: oisData?.senesteSalgKoebesum ?? null,
-      dato: oisData?.senesteSalgDato ?? null,
+      koebesum: oisData.senesteSalgKoebesum,
+      dato: oisData.senesteSalgDato,
       m2Pris: null as number | null,
     };
 
@@ -302,11 +331,26 @@ async function hentEjendomFraBfe(bfeNummer: string): Promise<NextResponse> {
     nabosammenligning = beregnNabosammenligning(referencer);
 
     // Beregn indsigelse
-    const indsigelse = {
+    let indsigelse = {
       potentiale: false,
       procentOverMarked: null as number | null,
       begrundelse: 'Manglende data til sammenligning',
     };
+
+    if (vurdering.ejendomsvaerdi2025 && nabosammenligning && nabosammenligning.antalReferencer > 0) {
+      const markedM2Pris = nabosammenligning.gennemsnitM2Pris;
+      const vurderingM2Pris = vurdering.ejendomsvaerdi2025;
+      const procentOver = ((vurderingM2Pris - markedM2Pris) / markedM2Pris) * 100;
+
+      indsigelse = {
+        potentiale: procentOver > 15,
+        procentOverMarked: Math.round(procentOver * 10) / 10,
+        begrundelse:
+          procentOver > 15
+            ? `Vurderingen er ${Math.round(procentOver)}% over markedets gennemsnitlige m²-pris (${markedM2Pris.toLocaleString('da-DK')} kr/m²)`
+            : 'Vurderingen ligger inden for normalt interval i forhold til markedet',
+      };
+    }
 
     const response: EjendomResponse = {
       success: true,
@@ -314,16 +358,9 @@ async function hentEjendomFraBfe(bfeNummer: string): Promise<NextResponse> {
         basis: {
           adresseId: bfeNummer,
           adresseTekst: beliggenhed,
-          vejnavn: beliggenhed.split(',')[0] ?? '',
-          husnr: '',
-          postnr: '',
-          postnrnavn: '',
-          kommunekode: null,
           bfeNummer,
-          matrikelnr: null,
-          boligArealM2: null,
-          byggeaar: null,
-          samletArealM2: null,
+          boligArealM2: null, // OIS returnerer ikke areal
+          byggeaar: null, // OIS returnerer ikke byggeår
         },
         vurdering,
         senesteSalg,
@@ -333,8 +370,7 @@ async function hentEjendomFraBfe(bfeNummer: string): Promise<NextResponse> {
       meta: {
         adresseId: bfeNummer,
         hentet: new Date().toISOString(),
-        dawaStatus: 'ok',
-        datafordelerStatus: 'ok',
+        oisStatus: 'ok',
       },
     };
 
@@ -344,12 +380,11 @@ async function hentEjendomFraBfe(bfeNummer: string): Promise<NextResponse> {
     return NextResponse.json<EjendomResponse>(
       {
         success: false,
-        error: 'Kunne ikke hente ejendomsdata fra BFE',
+        error: 'Kunne ikke hente ejendomsdata fra OIS',
         meta: {
           adresseId: bfeNummer,
           hentet: new Date().toISOString(),
-          dawaStatus: 'fejl',
-          datafordelerStatus: 'fejl',
+          oisStatus: 'fejl',
         },
       },
       { status: 500 }
@@ -365,14 +400,10 @@ export async function GET() {
     status: 'ok',
     endpoints: {
       'POST /api/ejendom': {
-        description: 'Hent samlet ejendomsdata for en adresse',
-        body: { adresseId: 'string (DAWA adresse UUID)' },
+        description: 'Hent samlet ejendomsdata for et BFE-nummer',
+        body: { bfeNummer: 'string (BFE-nummer)' },
       },
     },
-    miljoe: {
-      dawa: 'lukket 1. oktober 2026 - migrer til Datafordeleren DAR',
-      bbrLight: 'lukket 3. april 2024 - brug BBR GraphQL',
-      datafordeler: 'kræver DATAFORDELER_USERNAME og DATAFORDELER_PASSWORD',
-    },
+    note: 'Bruger OIS.dk som datakilde',
   });
 }

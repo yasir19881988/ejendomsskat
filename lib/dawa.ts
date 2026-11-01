@@ -137,7 +137,7 @@ class DawaClient {
     }
 
     // DAR GraphQL query for adresse-søgning
-    // Kræver registreringstid eller virkningstid filter for fri-tekst søgning
+    // Inkluderer id_lokalId som OIS bruger som addressId
     const graphqlQuery = {
       query: `
         query SoegAdresser($soeg: String!, $limit: Int!) {
@@ -150,6 +150,7 @@ class DawaClient {
           ) {
             nodes {
               datafordelerRowId
+              id_lokalId
               adressebetegnelse
             }
           }
@@ -173,23 +174,24 @@ class DawaClient {
       );
 
       // Konverter DAR format til DAWA autocomplete format for kompatibilitet
-      // adressebetegnelse indeholder fuld adresse som "Vejnavn 10, 2000 Frederiksberg"
       const nodes = data?.data?.DAR_Adresse?.nodes || [];
       const resultater = nodes.map((node: any) => {
         const betegnelse = node.adressebetegnelse || '';
-        // Parse "Vejnavn 10, 2000 Frederiksberg" til komponenter
-        const match = betegnelse.match(/^(.+?)\s+(\d+[A-Z]?),?\s+(\d{4})\s+(.+)$/);
-        const vejnavn = match?.[1] ?? '';
-        const husnr = match?.[2] ?? '';
-        const postnr = match?.[3] ?? '';
-        const postnrnavn = match?.[4] ?? '';
+        // Parse adresse bagfra: "Vej 10, 4., 1360 København K" → postnr+bynavn til sidst
+        const postMatch = betegnelse.match(/(\d{4})\s+([^,]+)$/);
+        const postnr = postMatch?.[1] ?? '';
+        const postnrnavn = postMatch?.[2]?.trim() ?? '';
+        const forPost = postMatch ? betegnelse.slice(0, postMatch.index).replace(/,\s*$/, '') : betegnelse;
+        const husMatch = forPost.match(/^(.*?)\s+(\d+[A-Za-z]?)(?:,\s*.*)?$/);
+        const vejnavn = husMatch?.[1]?.trim() ?? forPost;
+        const husnr = husMatch?.[2] ?? '';
 
         return {
           type: 'adgangsadresse',
           tekst: betegnelse,
           forslagstekst: betegnelse,
           data: {
-            id: node.datafordelerRowId,
+            id: node.id_lokalId ?? node.datafordelerRowId,
             vejnavn,
             husnr,
             postnr,
@@ -226,21 +228,22 @@ class DawaClient {
     }
 
     try {
-      // 1. Hent DAR_Husnummer (adgangsadresse) for at få jordstykke-ID
-      const husnummerResponse = await this.http.post(
+      // 1. Hent DAR_Adresse via id_lokalId (som OIS bruger som addressId)
+      const adresseResponse = await this.http.post(
         `${DAR_GRAPHQL_URL}?apiKey=${apiKey}`,
         {
           query: `
-            query HentHusnummer($id: UUID!) {
-              DAR_Husnummer(
-                where: { datafordelerRowId: { eq: $id } }
-                registreringstid: "2026-01-01T00:00:00Z"
+            query HentAdresse($id: String!) {
+              DAR_Adresse(
+                where: { id_lokalId: { eq: $id } }
+                virkningstid: "2026-01-01T00:00:00Z"
                 first: 1
               ) {
                 nodes {
                   datafordelerRowId
-                  adgangsadressebetegnelse
-                  jordstykke
+                  id_lokalId
+                  adressebetegnelse
+                  husnummer
                 }
               }
             }
@@ -250,60 +253,30 @@ class DawaClient {
         { headers: { 'Content-Type': 'application/json' } }
       );
 
-      let node = husnummerResponse?.data?.data?.DAR_Husnummer?.nodes?.[0];
-
-      // Fallback til DAR_Adresse hvis Husnummer ikke findes
-      // Bemærk: DAR_Adresse har ikke jordstykke felt - vi henter det via Husnummer hvis muligt
-      if (!node) {
-        const adresseResponse = await this.http.post(
-          `${DAR_GRAPHQL_URL}?apiKey=${apiKey}`,
-          {
-            query: `
-              query HentAdresse($id: UUID!) {
-                DAR_Adresse(
-                  where: { datafordelerRowId: { eq: $id } }
-                  registreringstid: "2026-01-01T00:00:00Z"
-                  first: 1
-                ) {
-                  nodes {
-                    datafordelerRowId
-                    adressebetegnelse
-                  }
-                }
-              }
-            `,
-            variables: { id },
-          },
-          { headers: { 'Content-Type': 'application/json' } }
-        );
-        node = adresseResponse?.data?.data?.DAR_Adresse?.nodes?.[0];
-      }
-
+      const node = adresseResponse?.data?.data?.DAR_Adresse?.nodes?.[0];
       if (!node) return null;
 
-      const betegnelse = node.adgangsadressebetegnelse || node.adressebetegnelse || '';
-      // DAR_Husnummer har jordstykke, DAR_Adresse har det ikke
-      const jordstykkeId = node.jordstykke ?? null;
+      const betegnelse = node.adressebetegnelse || '';
+      const idLokalId = node.id_lokalId;
 
-      // Parse adressebetegnelse (format: "Vejnavn 10, 2000 Frederiksberg")
-      const match = betegnelse.match(/^(.+?)\s+(\d+[A-Z]?),?\s+(\d{4})\s+(.+)$/);
-      const vejnavn = match?.[1] ?? '';
-      const husnr = match?.[2] ?? '';
-      const postnr = match?.[3] ?? '';
-      const postnrnavn = match?.[4] ?? '';
+      // Parse adresse bagfra: "Vej 10, 4., 1360 København K" → postnr+bynavn til sidst
+      const postMatch = betegnelse.match(/(\d{4})\s+([^,]+)$/);
+      const postnr = postMatch?.[1] ?? '';
+      const postnrnavn = postMatch?.[2]?.trim() ?? '';
+      const forPost = postMatch ? betegnelse.slice(0, postMatch.index).replace(/,\s*$/, '') : betegnelse;
+      const husMatch = forPost.match(/^(.*?)\s+(\d+[A-Za-z]?)(?:,\s*.*)?$/);
+      const vejnavn = husMatch?.[1]?.trim() ?? forPost;
+      const husnr = husMatch?.[2] ?? '';
 
-      // 2. Hent BFE-nummer via MAT-kæden hvis vi har jordstykke-ID
+      // 2. Hent BFE-nummer via OIS's GetBFEFromAddressId
+      // OIS bruger adgangsadresse-ID (husnummer-referencen), ikke enheds-ID
       let bfeNummer: string | null = null;
       let boligAreal: number | null = null;
       let byggeaar: number | null = null;
 
-      if (jordstykkeId) {
-        bfeNummer = await this.hentBfeFraJordstykke(jordstykkeId, apiKey);
-      }
-
-      // Fallback: Brug OIS til at finde BFE via adresse-match hvis MAT-kæden fejlede
-      if (!bfeNummer) {
-        bfeNummer = await oisClient.findBfeFraAdresse(betegnelse);
+      const adgangsadresseId = node.husnummer ?? idLokalId;
+      if (adgangsadresseId) {
+        bfeNummer = await oisClient.hentBfeFraAdresseId(adgangsadresseId);
       }
 
       // 3. Hent BBR-data via BFE-nummer
@@ -314,7 +287,7 @@ class DawaClient {
       }
 
       const result = {
-        id: node.datafordelerRowId,
+        id: idLokalId ?? node.datafordelerRowId,
         status: 1,
         oprettet: '',
         ændret: '',
@@ -325,7 +298,7 @@ class DawaClient {
         kommune: { kode: '', navn: '' },
         ejerlav: null,
         esrejendomsnr: bfeNummer,
-        matrikelnr: jordstykkeId ?? null,
+        matrikelnr: null,
         historik: { oprettet: '', ændret: '' },
         adgangspunkt: { koordinater: [0, 0] as [number, number] },
         DDKN: null,
@@ -335,9 +308,7 @@ class DawaClient {
         politikreds: null,
         opstillingskreds: null,
         zone: null,
-        jordstykke: jordstykkeId
-          ? { matrikelnr: jordstykkeId, esrejendomsnr: bfeNummer ?? '' }
-          : null,
+        jordstykke: null,
         boligArealM2: boligAreal,
         byggeaar: byggeaar,
       };

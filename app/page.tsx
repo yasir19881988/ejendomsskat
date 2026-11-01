@@ -11,71 +11,7 @@ interface AdresseForslag {
   forslagstekst: string;
 }
 
-interface SogeState {
-  query: string;
-  forslag: AdresseForslag[];
-  visForslag: boolean;
-  valgtAdresse: AdresseForslag | null;
-  loader: boolean;
-  fejl: string | null;
-}
-
 // ---------- Komponenter ----------
-
-function SogeFelt({
-  state,
-  onQueryChange,
-  onVaelg,
-  onSoeg,
-}: {
-  state: SogeState;
-  onQueryChange: (q: string) => void;
-  onVaelg: (adresse: AdresseForslag) => void;
-  onSoeg: () => void;
-}) {
-  return (
-    <div className="relative w-full max-w-2xl">
-      <div className="flex gap-2">
-        <div className="relative flex-1">
-          <input
-            type="text"
-            value={state.query}
-            onChange={(e) => onQueryChange(e.target.value)}
-            onFocus={() => state.forslag.length > 0 && onQueryChange(state.query)}
-            placeholder="Indtast adresse (f.eks. Frederiksberg Allé 10, 2000 Frederiksberg)"
-            className="w-full rounded-lg border border-zinc-300 bg-white px-4 py-3 text-lg shadow-sm focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-200 dark:border-zinc-700 dark:bg-zinc-900 dark:text-white"
-          />
-          {state.visForslag && state.forslag.length > 0 && (
-            <ul className="absolute z-10 mt-1 w-full rounded-lg border border-zinc-200 bg-white shadow-lg dark:border-zinc-700 dark:bg-zinc-900">
-              {state.forslag.map((f) => (
-                <li key={f.id}>
-                  <button
-                    type="button"
-                    onClick={() => onVaelg(f)}
-                    className="w-full px-4 py-3 text-left hover:bg-zinc-100 dark:hover:bg-zinc-800"
-                  >
-                    <span className="font-medium">{f.forslagstekst}</span>
-                  </button>
-                </li>
-              ))}
-            </ul>
-          )}
-        </div>
-        <button
-          type="button"
-          onClick={onSoeg}
-          disabled={state.loader || !state.valgtAdresse}
-          className="rounded-lg bg-blue-600 px-6 py-3 text-lg font-semibold text-white shadow-sm hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50"
-        >
-          {state.loader ? 'Søger...' : 'Tjek vurdering'}
-        </button>
-      </div>
-      {state.fejl && (
-        <p className="mt-2 text-sm text-red-600 dark:text-red-400">{state.fejl}</p>
-      )}
-    </div>
-  );
-}
 
 function DataKort({
   titel,
@@ -147,7 +83,7 @@ function NabotjekTabel({ data }: { data: EjendomResponse['data'] }) {
       <div className="rounded-xl border border-zinc-200 bg-white p-6 dark:border-zinc-800 dark:bg-zinc-900">
         <h3 className="text-lg font-semibold text-zinc-900 dark:text-white">Nabotjek</h3>
         <p className="mt-2 text-zinc-500 dark:text-zinc-400">
-          Ingen referencsalg fundet i området. Prøv en anden adresse eller kontakt support.
+          Ingen referencsalg fundet i området. Prøv en anden adresse.
         </p>
       </div>
     );
@@ -159,7 +95,7 @@ function NabotjekTabel({ data }: { data: EjendomResponse['data'] }) {
     <div className="rounded-xl border border-zinc-200 bg-white p-6 dark:border-zinc-800 dark:bg-zinc-900">
       <h3 className="text-lg font-semibold text-zinc-900 dark:text-white">Nabotjek</h3>
       <p className="mt-1 text-sm text-zinc-500 dark:text-zinc-400">
-        Baseret på {n.antalReferencer} solgte ejendomme i samme postnummer ({n.sammenligningsPeriode})
+        Baseret på {n.antalReferencer} solgte ejendomme i nærheden ({n.sammenligningsPeriode})
       </p>
 
       <div className="mt-4 grid grid-cols-1 gap-4 sm:grid-cols-3">
@@ -185,23 +121,17 @@ function NabotjekTabel({ data }: { data: EjendomResponse['data'] }) {
         <table className="w-full text-left text-sm">
           <thead>
             <tr className="border-b border-zinc-200 dark:border-zinc-700">
-              <th className="pb-3 font-medium text-zinc-500 dark:text-zinc-400">Adresse</th>
+              <th className="pb-3 font-medium text-zinc-500 dark:text-zinc-400">BFE-nr</th>
               <th className="pb-3 font-medium text-zinc-500 dark:text-zinc-400">Salgspris</th>
-              <th className="pb-3 font-medium text-zinc-500 dark:text-zinc-400">Areal</th>
-              <th className="pb-3 font-medium text-zinc-500 dark:text-zinc-400">m²-pris</th>
               <th className="pb-3 font-medium text-zinc-500 dark:text-zinc-400">Dato</th>
             </tr>
           </thead>
           <tbody>
             {n.referencer.slice(0, 10).map((ref, i) => (
               <tr key={i} className="border-b border-zinc-100 dark:border-zinc-800">
-                <td className="py-3 text-zinc-900 dark:text-white">{ref.adresse}</td>
+                <td className="py-3 text-zinc-900 dark:text-white">{ref.bfeNummer}</td>
                 <td className="py-3 text-zinc-900 dark:text-white">
                   {ref.koebesum.toLocaleString('da-DK')} kr
-                </td>
-                <td className="py-3 text-zinc-900 dark:text-white">{ref.boligArealM2} m²</td>
-                <td className="py-3 font-medium text-blue-600 dark:text-blue-400">
-                  {Math.round(ref.m2Pris).toLocaleString('da-DK')} kr/m²
                 </td>
                 <td className="py-3 text-zinc-500 dark:text-zinc-400">{ref.salgsdato}</td>
               </tr>
@@ -216,71 +146,63 @@ function NabotjekTabel({ data }: { data: EjendomResponse['data'] }) {
 // ---------- Hovedside ----------
 
 export default function Home() {
-  const [state, setState] = useState<SogeState>({
-    query: '',
-    forslag: [],
-    visForslag: false,
-    valgtAdresse: null,
-    loader: false,
-    fejl: null,
-  });
-
+  const [query, setQuery] = useState('');
+  const [forslag, setForslag] = useState<AdresseForslag[]>([]);
+  const [visForslag, setVisForslag] = useState(false);
+  const [valgtAdresse, setValgtAdresse] = useState<AdresseForslag | null>(null);
+  const [bfeInput, setBfeInput] = useState('');
   const [resultat, setResultat] = useState<EjendomResponse | null>(null);
-  const [resultatLoader, setResultatLoader] = useState(false);
-  const [manuelBfe, setManuelBfe] = useState('');
+  const [loader, setLoader] = useState(false);
+  const [fejl, setFejl] = useState<string | null>(null);
 
   // Debounce autocomplete
   useEffect(() => {
-    if (state.query.length < 3) {
-      setState((s) => ({ ...s, forslag: [], visForslag: false }));
+    if (query.length < 3) {
+      setForslag([]);
+      setVisForslag(false);
       return;
     }
 
     const timer = setTimeout(async () => {
       try {
-        const res = await fetch(`/api/adresse?q=${encodeURIComponent(state.query)}&limit=8`);
+        const res = await fetch(`/api/adresse?q=${encodeURIComponent(query)}&limit=5`);
         if (!res.ok) throw new Error('Autocomplete fejlede');
         const data = await res.json();
-        setState((s) => ({
-          ...s,
-          forslag: data.forslag ?? [],
-          visForslag: true,
-          fejl: null,
-        }));
-      } catch (err) {
-        setState((s) => ({
-          ...s,
-          forslag: [],
-          visForslag: false,
-          fejl: 'Kunne ikke hente adresseforslag. Prøv igen.',
-        }));
+        setForslag(data.forslag ?? []);
+        setVisForslag(true);
+      } catch {
+        setForslag([]);
+        setVisForslag(false);
       }
     }, 300);
 
     return () => clearTimeout(timer);
-  }, [state.query]);
+  }, [query]);
 
-  const handleVaelg = useCallback((adresse: AdresseForslag) => {
-    setState((s) => ({
-      ...s,
-      valgtAdresse: adresse,
-      query: adresse.forslagstekst,
-      visForslag: false,
-    }));
+  const handleVaelgAdresse = useCallback((adresse: AdresseForslag) => {
+    setValgtAdresse(adresse);
+    setQuery(adresse.forslagstekst);
+    setVisForslag(false);
+    setFejl(null);
   }, []);
 
   const handleSoeg = useCallback(async () => {
-    if (!state.valgtAdresse) return;
-
-    setResultatLoader(true);
-    setState((s) => ({ ...s, fejl: null }));
+    setLoader(true);
+    setFejl(null);
+    setResultat(null);
 
     try {
-      // Hvis ID er et rent tal, er det et BFE-nummer
-      const erBfe = /^\d+$/.test(state.valgtAdresse.id);
-      const body = erBfe
-        ? { bfeNummer: state.valgtAdresse.id }
-        : { adresseId: state.valgtAdresse.id };
+      let body: { adresseId?: string; bfeNummer?: string };
+
+      if (bfeInput && /^\d+$/.test(bfeInput)) {
+        body = { bfeNummer: bfeInput };
+      } else if (valgtAdresse) {
+        body = { adresseId: valgtAdresse.id };
+      } else {
+        setFejl('Vælg en adresse fra listen eller indtast et BFE-nummer');
+        setLoader(false);
+        return;
+      }
 
       const res = await fetch('/api/ejendom', {
         method: 'POST',
@@ -291,18 +213,18 @@ export default function Home() {
       const data: EjendomResponse = await res.json();
 
       if (!data.success) {
-        setState((s) => ({ ...s, fejl: data.error ?? 'Ukendt fejl' }));
+        setFejl(data.error ?? 'Ukendt fejl');
         setResultat(null);
       } else {
         setResultat(data);
       }
-    } catch (err) {
-      setState((s) => ({ ...s, fejl: 'Netværksfejl. Prøv igen.' }));
+    } catch {
+      setFejl('Netværksfejl. Prøv igen.');
       setResultat(null);
     } finally {
-      setResultatLoader(false);
+      setLoader(false);
     }
-  }, [state.valgtAdresse]);
+  }, [valgtAdresse, bfeInput]);
 
   return (
     <div className="min-h-screen bg-zinc-50 dark:bg-zinc-950">
@@ -340,48 +262,62 @@ export default function Home() {
             nærområde. Se om der er basis for indsigelse.
           </p>
 
-          <div className="mt-10 flex justify-center">
-            <SogeFelt
-              state={state}
-              onQueryChange={(q) =>
-                setState((s) => ({ ...s, query: q, valgtAdresse: null }))
-              }
-              onVaelg={handleVaelg}
-              onSoeg={handleSoeg}
-            />
-          </div>
+          <div className="mt-10">
+            {/* Adresse-søgning med autocomplete */}
+            <div className="relative mx-auto max-w-2xl">
+              <div className="flex gap-2">
+                <div className="relative flex-1">
+                  <input
+                    type="text"
+                    value={query}
+                    onChange={(e) => {
+                      setQuery(e.target.value);
+                      setValgtAdresse(null);
+                    }}
+                    onFocus={() => forslag.length > 0 && setVisForslag(true)}
+                    placeholder="Indtast adresse (f.eks. Frederiksberg Allé 10, 2000 Frederiksberg)"
+                    className="w-full rounded-lg border border-zinc-300 bg-white px-4 py-3 text-lg shadow-sm focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-200 dark:border-zinc-700 dark:bg-zinc-900 dark:text-white"
+                  />
+                  {visForslag && forslag.length > 0 && (
+                    <ul className="absolute z-10 mt-1 max-h-64 w-full overflow-y-auto rounded-lg border border-zinc-200 bg-white shadow-lg dark:border-zinc-700 dark:bg-zinc-900">
+                      {forslag.map((f) => (
+                        <li key={f.id}>
+                          <button
+                            type="button"
+                            onClick={() => handleVaelgAdresse(f)}
+                            className="w-full px-4 py-3 text-left hover:bg-zinc-100 dark:hover:bg-zinc-800"
+                          >
+                            <span className="font-medium">{f.forslagstekst}</span>
+                          </button>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+                <button
+                  type="button"
+                  onClick={handleSoeg}
+                  disabled={loader || (!valgtAdresse && !bfeInput)}
+                  className="rounded-lg bg-blue-600 px-6 py-3 text-lg font-semibold text-white shadow-sm hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  {loader ? 'Søger...' : 'Tjek vurdering'}
+                </button>
+              </div>
+              {fejl && (
+                <p className="mt-2 text-sm text-red-600 dark:text-red-400">{fejl}</p>
+              )}
+            </div>
 
-          {/* Manuel BFE indtastning som fallback */}
-          <div className="mt-4 flex justify-center">
-            <div className="flex items-center gap-2 text-sm">
-              <span className="text-zinc-500 dark:text-zinc-400">Eller indtast BFE-nummer direkte:</span>
+            {/* BFE-fallback */}
+            <div className="mt-4 flex items-center justify-center gap-2 text-sm">
+              <span className="text-zinc-500 dark:text-zinc-400">Eller brug BFE-nummer:</span>
               <input
                 type="text"
-                value={manuelBfe}
-                onChange={(e) => setManuelBfe(e.target.value.replace(/\D/g, ''))}
+                value={bfeInput}
+                onChange={(e) => setBfeInput(e.target.value.replace(/\D/g, ''))}
                 placeholder="F.eks. 123456"
                 className="w-32 rounded border border-zinc-300 bg-white px-3 py-1 text-sm dark:border-zinc-700 dark:bg-zinc-900 dark:text-white"
               />
-              <button
-                type="button"
-                onClick={() => {
-                  if (manuelBfe) {
-                    setState((s) => ({
-                      ...s,
-                      valgtAdresse: {
-                        id: manuelBfe,
-                        tekst: `BFE ${manuelBfe}`,
-                        forslagstekst: `BFE ${manuelBfe}`,
-                      },
-                    }));
-                    handleSoeg();
-                  }
-                }}
-                disabled={!manuelBfe || manuelBfe.length < 5}
-                className="rounded bg-zinc-600 px-3 py-1 text-sm text-white hover:bg-zinc-700 disabled:opacity-50"
-              >
-                Brug BFE
-              </button>
             </div>
           </div>
 
@@ -392,7 +328,7 @@ export default function Home() {
             </span>
             <span className="flex items-center gap-1">
               <span className="h-2 w-2 rounded-full bg-green-500"></span>
-              Data fra DAWA og Datafordeleren
+              Data fra DAR og OIS.dk
             </span>
             <span className="flex items-center gap-1">
               <span className="h-2 w-2 rounded-full bg-amber-500"></span>
@@ -404,7 +340,7 @@ export default function Home() {
 
       {/* Resultat */}
       <main className="mx-auto max-w-7xl px-4 py-12">
-        {resultatLoader && (
+        {loader && (
           <div className="flex items-center justify-center py-20">
             <div className="h-10 w-10 animate-spin rounded-full border-4 border-blue-600 border-t-transparent"></div>
           </div>
@@ -419,8 +355,12 @@ export default function Home() {
               </h2>
               <div className="mt-2 flex flex-wrap gap-4 text-sm text-zinc-500 dark:text-zinc-400">
                 <span>BFE-nr: {resultat.data.basis.bfeNummer ?? 'Ikke fundet'}</span>
-                <span>Matrikel: {resultat.data.basis.matrikelnr ?? 'Ikke fundet'}</span>
-                <span>Kommune: {resultat.data.basis.kommunekode ?? 'Ikke fundet'}</span>
+                {resultat.data.basis.boligArealM2 && (
+                  <span>Areal: {resultat.data.basis.boligArealM2} m²</span>
+                )}
+                {resultat.data.basis.byggeaar && (
+                  <span>Byggeår: {resultat.data.basis.byggeaar}</span>
+                )}
               </div>
             </div>
 
@@ -464,7 +404,7 @@ export default function Home() {
                 Offentlig ejendomsvurdering
               </h3>
               <p className="mt-1 text-sm text-zinc-500 dark:text-zinc-400">
-                Data fra Vurderingsstyrelsen / Åbne Ejendomsdata (2024/2025)
+                Data fra Vurderingsstyrelsen via OIS.dk
               </p>
 
               <div className="mt-4 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
@@ -498,19 +438,14 @@ export default function Home() {
             {/* Meta-info */}
             <div className="rounded-lg border border-zinc-200 bg-zinc-50 p-4 text-xs text-zinc-500 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-400">
               <p>
-                Data hentet: {new Date(resultat.meta.hentet).toLocaleString('da-DK')} | DAWA
-                status: {resultat.meta.dawaStatus} | Datafordeler status:{' '}
-                {resultat.meta.datafordelerStatus}
-              </p>
-              <p className="mt-1">
-                Bemærk: DAWA API lukkede 1. oktober 2026. Denne MVP bruger DAWA som fallback, men
-                produktionsversionen bør migrere til Datafordelerens DAR GraphQL.
+                Data hentet: {new Date(resultat.meta.hentet).toLocaleString('da-DK')} | OIS
+                status: {resultat.meta.oisStatus}
               </p>
             </div>
           </div>
         )}
 
-        {!resultat && !resultatLoader && (
+        {!resultat && !loader && (
           <div className="rounded-xl border-2 border-dashed border-zinc-300 p-12 text-center dark:border-zinc-700">
             <div className="mx-auto flex h-16 w-16 items-center justify-center rounded-full bg-zinc-100 dark:bg-zinc-800">
               <svg
@@ -543,8 +478,7 @@ export default function Home() {
         <div className="mx-auto max-w-7xl text-center text-sm text-zinc-500 dark:text-zinc-400">
           <p>ejendomsskat.dk — Tjek din ejendomsvurdering mod markedets salgspriser</p>
           <p className="mt-2">
-            Datakilder: DAWA (Danmarks Adressers Web API), Datafordeleren (Tinglysning),
-            Vurderingsstyrelsen
+            Datakilder: DAR (Danmarks Adresseregister), OIS.dk (Den Offentlige Informationsserver)
           </p>
         </div>
       </footer>
