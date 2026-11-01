@@ -182,29 +182,75 @@ async function hentEjendomFraBfeMedBasis(bfeNummer: string, basis: { adresseId: 
         : null,
     };
 
-    // Beregn nabotjek
+    // Beregn nabotjek - geografisk baseret hvis muligt, ellers BFE-sekvens som fallback
     let nabosammenligning: ReturnType<typeof beregnNabosammenligning> | null = null;
-    const bfeListe = oisClient.genererBfeListe(aktivBfe, 40);
+    let bfeListe: string[] = [];
+
+    const apiKey = process.env.DATAFORDELER_API_KEY ?? '';
+
+    // Forsøg geografisk søgning først (find naboer inden for 300m)
+    if (apiKey) {
+      const koordinater = await oisClient.hentKoordinaterFraAdresseId(apiKey, basis.adresseId);
+      if (koordinater) {
+        console.log(`Geografisk søgning omkring ${koordinater.x}, ${koordinater.y}`);
+        bfeListe = await oisClient.hentBfeListeFraGeografi(apiKey, koordinater.x, koordinater.y, 300);
+        console.log(`Geografisk søgning fandt ${bfeListe.length} BFE'er`);
+      } else {
+        console.log('Kunne ikke hente koordinater for adresse');
+      }
+    }
+
+    // Fallback til BFE-sekvens hvis geografisk søgning ikke fandt naboer
+    if (bfeListe.length === 0) {
+      bfeListe = oisClient.genererBfeListe(aktivBfe, 40);
+      console.log(`Fallback til BFE-sekvens omkring ${aktivBfe}`);
+    }
+
     const oisDataListe = await oisClient.hentSalgsdataForBfeListe(bfeListe);
+    console.log(`Nabotjek: ${bfeListe.length} BFE'er fundet, ${oisDataListe.filter(d => d.senesteSalgKoebesum).length} med salgsdata`);
+
+    // Debug: log salgsdatoer
+    oisDataListe.forEach((d) => {
+      if (d.senesteSalgKoebesum) {
+        console.log(`  BFE ${d.bfeNummer}: ${d.senesteSalgKoebesum} kr, dato: ${d.senesteSalgDato}`);
+      }
+    });
 
     const toAarSiden = new Date();
     toAarSiden.setFullYear(toAarSiden.getFullYear() - 2);
 
-    const referencer: SalgsReference[] = oisDataListe
-      .filter((d) => {
-        if (!d.senesteSalgKoebesum || d.senesteSalgKoebesum <= 0) return false;
-        if (!d.senesteSalgDato) return false;
-        const salgsDato = new Date(d.senesteSalgDato);
-        return salgsDato >= toAarSiden;
-      })
-      .map((d) => ({
-        adresse: `BFE ${d.bfeNummer}`,
-        bfeNummer: d.bfeNummer,
-        koebesum: d.senesteSalgKoebesum!,
-        salgsdato: d.senesteSalgDato ?? '',
-        boligArealM2: basis.boligArealM2 ?? 0,
-        m2Pris: basis.boligArealM2 ? d.senesteSalgKoebesum! / basis.boligArealM2 : 0,
-      }));
+    const referencer: SalgsReference[] = (
+      await Promise.all(
+        oisDataListe
+          .filter((d) => {
+            // Inkluder kun hvis der er salgspris
+            if (!d.senesteSalgKoebesum || d.senesteSalgKoebesum <= 0) return false;
+            // Hvis der er en dato, skal den være inden for seneste 2 år
+            // Hvis der ikke er en dato, inkluderer vi den alligevel (bedre end ingenting)
+            if (d.senesteSalgDato) {
+              const salgsDato = new Date(d.senesteSalgDato);
+              return salgsDato >= toAarSiden;
+            }
+            return true;
+          })
+          .map(async (d) => {
+            // Hent adresse for denne reference
+            const info = await oisClient.hentGenerelInfo(d.bfeNummer);
+            const sfeInfo = info?.GeneralInfoSFE as Record<string, unknown> | undefined;
+            const ejlInfo = info?.GeneralInfoEJL as Record<string, unknown> | undefined;
+            const beliggenhed = String(sfeInfo?.beligenhed ?? ejlInfo?.beligenhed ?? `BFE ${d.bfeNummer}`);
+
+            return {
+              adresse: beliggenhed,
+              bfeNummer: d.bfeNummer,
+              koebesum: d.senesteSalgKoebesum!,
+              salgsdato: d.senesteSalgDato ?? '',
+              boligArealM2: basis.boligArealM2 ?? 0,
+              m2Pris: basis.boligArealM2 ? d.senesteSalgKoebesum! / basis.boligArealM2 : 0,
+            };
+          })
+      )
+    );
 
     nabosammenligning = beregnNabosammenligning(referencer);
 

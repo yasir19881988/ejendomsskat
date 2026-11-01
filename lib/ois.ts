@@ -97,6 +97,172 @@ class OisClient {
   }
 
   /**
+   * Hent BFE'er for adresser inden for en radius omkring et punkt.
+   * Bruger DAR's geografiske søgning på Adressepunkt → husnummer → BFE via OIS.
+   */
+  async hentBfeListeFraGeografi(
+    apiKey: string,
+    x: number,
+    y: number,
+    radiusMeter: number = 300
+  ): Promise<string[]> {
+    try {
+      // Byg buffer-polygon omkring punktet (kvadrat for simpelhed)
+      const halv = radiusMeter;
+      const minX = x - halv;
+      const maxX = x + halv;
+      const minY = y - halv;
+      const maxY = y + halv;
+      const wkt = `POLYGON((${minX} ${minY}, ${maxX} ${minY}, ${maxX} ${maxY}, ${minX} ${maxY}, ${minX} ${minY}))`;
+
+      // 1. Find alle adressepunkter inden for radius
+      const punkterResponse = await axios.post(
+        `https://graphql.datafordeler.dk/DAR/v3?apiKey=${apiKey}`,
+        {
+          query: `
+            query FindPunkter($wkt: String!) {
+              DAR_Adressepunkt(
+                where: { position: { within: { crs: 25832, wkt: $wkt } } }
+                virkningstid: "2026-01-01T00:00:00Z"
+                first: 50
+              ) {
+                nodes { id_lokalId }
+              }
+            }
+          `,
+          variables: { wkt },
+        },
+        { headers: { 'Content-Type': 'application/json' } }
+      );
+
+      const punktIds: string[] = (punkterResponse?.data?.data?.DAR_Adressepunkt?.nodes ?? [])
+        .map((n: any) => n.id_lokalId)
+        .filter(Boolean);
+
+      if (punktIds.length === 0) return [];
+
+      // 2. Find husnumre tilknyttet disse adressepunkter
+      const husnummerResponse = await axios.post(
+        `https://graphql.datafordeler.dk/DAR/v3?apiKey=${apiKey}`,
+        {
+          query: `
+            query FindHusnumre($ids: [String!]!) {
+              DAR_Husnummer(
+                where: { adgangspunkt: { in: $ids } }
+                virkningstid: "2026-01-01T00:00:00Z"
+                first: 50
+              ) {
+                nodes { id_lokalId adgangsadressebetegnelse }
+              }
+            }
+          `,
+          variables: { ids: punktIds },
+        },
+        { headers: { 'Content-Type': 'application/json' } }
+      );
+
+      const husnumre = husnummerResponse?.data?.data?.DAR_Husnummer?.nodes ?? [];
+
+      // 3. Hent BFE for hvert husnummer via OIS
+      const bfeListe: string[] = [];
+      for (const hus of husnumre.slice(0, 30)) {
+        const bfe = await this.hentBfeFraAdresseId(hus.id_lokalId);
+        if (bfe) bfeListe.push(bfe);
+      }
+
+      return [...new Set(bfeListe)];
+    } catch (error) {
+      console.error('Fejl ved geografisk BFE-søgning:', error);
+      return [];
+    }
+  }
+
+  /**
+   * Hent koordinater for en adresse via DAR Adressepunkt.
+   */
+  async hentKoordinaterFraAdresseId(apiKey: string, adresseIdLokalId: string): Promise<{ x: number; y: number } | null> {
+    try {
+      // Find først husnummer for adressen
+      const adresseResponse = await axios.post(
+        `https://graphql.datafordeler.dk/DAR/v3?apiKey=${apiKey}`,
+        {
+          query: `
+            query HentHusnummer($id: String!) {
+              DAR_Adresse(
+                where: { id_lokalId: { eq: $id } }
+                virkningstid: "2026-01-01T00:00:00Z"
+                first: 1
+              ) {
+                nodes { husnummer }
+              }
+            }
+          `,
+          variables: { id: adresseIdLokalId },
+        },
+        { headers: { 'Content-Type': 'application/json' } }
+      );
+
+      const husnummerId = adresseResponse?.data?.data?.DAR_Adresse?.nodes?.[0]?.husnummer;
+      if (!husnummerId) return null;
+
+      // Find adressepunkt for husnummeret
+      const punktResponse = await axios.post(
+        `https://graphql.datafordeler.dk/DAR/v3?apiKey=${apiKey}`,
+        {
+          query: `
+            query HentPunkt($id: String!) {
+              DAR_Husnummer(
+                where: { id_lokalId: { eq: $id } }
+                virkningstid: "2026-01-01T00:00:00Z"
+                first: 1
+              ) {
+                nodes { adgangspunkt }
+              }
+            }
+          `,
+          variables: { id: husnummerId },
+        },
+        { headers: { 'Content-Type': 'application/json' } }
+      );
+
+      const adgangspunktId = punktResponse?.data?.data?.DAR_Husnummer?.nodes?.[0]?.adgangspunkt;
+      if (!adgangspunktId) return null;
+
+      // Hent selve punktet
+      const geoResponse = await axios.post(
+        `https://graphql.datafordeler.dk/DAR/v3?apiKey=${apiKey}`,
+        {
+          query: `
+            query HentGeometri($id: String!) {
+              DAR_Adressepunkt(
+                where: { id_lokalId: { eq: $id } }
+                virkningstid: "2026-01-01T00:00:00Z"
+                first: 1
+              ) {
+                nodes { position { wkt crs } }
+              }
+            }
+          `,
+          variables: { id: adgangspunktId },
+        },
+        { headers: { 'Content-Type': 'application/json' } }
+      );
+
+      const wkt = geoResponse?.data?.data?.DAR_Adressepunkt?.nodes?.[0]?.position?.wkt;
+      if (!wkt) return null;
+
+      // Parse "POINT (591940.12 6143533.62)"
+      const match = wkt.match(/POINT\s*\(\s*([\d.]+)\s+([\d.]+)\s*\)/);
+      if (!match) return null;
+
+      return { x: parseFloat(match[1]), y: parseFloat(match[2]) };
+    } catch (error) {
+      console.error('Fejl ved hentning af koordinater:', error);
+      return null;
+    }
+  }
+
+  /**
    * Hent ejendomsstruktur fra GetPropertyFromBFE (SFE, EJL-intervaller).
    */
   async hentEjendomStruktur(bfe: string): Promise<{ bfe: number; sfeBfe: number | null; ejlBfe: number | null; ejlInterval: string } | null> {
@@ -378,28 +544,6 @@ class OisClient {
     }
 
     return null;
-  }
-
-  /**
-   * Hent BFE-numre i et geografisk område via DAR (kræver koordinater).
-   * Returnerer BFE-numre for adresser inden for en given radius.
-   */
-  async hentBfeListeFraGeografi(
-    koordinater: [number, number],
-    radiusMeter: number,
-    apiKey: string
-  ): Promise<string[]> {
-    try {
-      // DAR understøtter ikke direkte geografisk søgning i GraphQL
-      // Vi bruger en simpel tilgang: find adresser i samme postnummer
-      // og filtrer derefter på afstand (hvis vi havde koordinater)
-      // For nu returnerer vi en tom liste - dette kræver yderligere implementation
-      console.warn('Geografisk BFE-søgning ikke implementeret endnu');
-      return [];
-    } catch (error) {
-      console.error('Fejl ved geografisk BFE-søgning:', error);
-      return [];
-    }
   }
 }
 
