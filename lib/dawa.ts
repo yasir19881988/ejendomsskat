@@ -137,44 +137,49 @@ class DawaClient {
     }
 
     // DAR GraphQL query for adresse-søgning
-    // Inkluderer id_lokalId som OIS bruger som addressId
-    const graphqlQuery = {
+    // DAR's startsWith er case-sensitiv, så vi laver to separate kald:
+    // ét med original query og ét med kapitaliseret første bogstav
+    const queryKapitaliseret = query.charAt(0).toUpperCase() + query.slice(1);
+    const lavQuery = (soeg: string) => ({
       query: `
         query SoegAdresser($soeg: String!, $limit: Int!) {
           DAR_Adresse(
-            where: {
-              adressebetegnelse: { startsWith: $soeg }
-            }
+            where: { adressebetegnelse: { startsWith: $soeg } }
             registreringstid: "2026-01-01T00:00:00Z"
             first: $limit
           ) {
-            nodes {
-              datafordelerRowId
-              id_lokalId
-              adressebetegnelse
-            }
+            nodes { datafordelerRowId id_lokalId adressebetegnelse }
           }
         }
       `,
-      variables: {
-        soeg: query,
-        limit,
-      },
-    };
+      variables: { soeg, limit },
+    });
 
     try {
-      const { data } = await this.http.post(
-        `${DAR_GRAPHQL_URL}?apiKey=${apiKey}`,
-        graphqlQuery,
-        {
-          headers: {
-            'Content-Type': 'application/json',
-          },
-        }
-      );
+      // Kør begge søgninger parallelt (DAR tillader ikke aliases eller multiple root fields)
+      const [res1, res2] = await Promise.all([
+        this.http.post(`${DAR_GRAPHQL_URL}?apiKey=${apiKey}`, lavQuery(query), {
+          headers: { 'Content-Type': 'application/json' },
+        }),
+        queryKapitaliseret !== query
+          ? this.http.post(`${DAR_GRAPHQL_URL}?apiKey=${apiKey}`, lavQuery(queryKapitaliseret), {
+              headers: { 'Content-Type': 'application/json' },
+            })
+          : Promise.resolve({ data: { data: { DAR_Adresse: { nodes: [] } } } }),
+      ]);
 
       // Konverter DAR format til DAWA autocomplete format for kompatibilitet
-      const nodes = data?.data?.DAR_Adresse?.nodes || [];
+      // Kombiner resultater fra begge queries og dedupliker
+      const nodes1 = res1.data?.data?.DAR_Adresse?.nodes || [];
+      const nodes2 = res2.data?.data?.DAR_Adresse?.nodes || [];
+      const alleNodes = [...nodes1, ...nodes2];
+      const unikkeIds = new Set<string>();
+      const nodes = alleNodes.filter((node: any) => {
+        const id = node.id_lokalId ?? node.datafordelerRowId;
+        if (unikkeIds.has(id)) return false;
+        unikkeIds.add(id);
+        return true;
+      });
       const resultater = nodes.map((node: any) => {
         const betegnelse = node.adressebetegnelse || '';
         // Parse adresse bagfra: "Vej 10, 4., 1360 København K" → postnr+bynavn til sidst
@@ -279,9 +284,9 @@ class DawaClient {
         bfeNummer = await oisClient.hentBfeFraAdresseId(adgangsadresseId);
       }
 
-      // 3. Hent BBR-data via BFE-nummer
-      if (bfeNummer) {
-        const bbrData = await this.hentBbrDataFraBfe(bfeNummer, apiKey);
+      // 3. Hent BBR-data via adresse-ID (præcist enhed-opslag)
+      if (idLokalId) {
+        const bbrData = await this.hentBbrDataFraAdresse(idLokalId, apiKey);
         boligAreal = bbrData.boligAreal;
         byggeaar = bbrData.byggeaar;
       }
@@ -405,6 +410,71 @@ class DawaClient {
     } catch (error) {
       console.error('Fejl ved BFE-opslag via MAT:', error);
       return null;
+    }
+  }
+
+  /**
+   * Hent BBR-data (boligareal, byggeår) via adresse-ID (DAR id_lokalId).
+   * Bruger BBR_Enhed med adresseIdentificerer for præcist areal pr. lejlighed.
+   */
+  private async hentBbrDataFraAdresse(adresseIdLokalId: string, apiKey: string): Promise<{ boligAreal: number | null; byggeaar: number | null }> {
+    try {
+      const enhedResponse = await this.http.post(
+        `https://graphql.datafordeler.dk/BBR/v3?apiKey=${apiKey}`,
+        {
+          query: `
+            query HentEnhed($adresseId: String!) {
+              BBR_Enhed(
+                where: { adresseIdentificerer: { eq: $adresseId } }
+                virkningstid: "2026-01-01T00:00:00Z"
+                first: 1
+              ) {
+                nodes {
+                  enh026EnhedensSamledeAreal
+                  enh027ArealTilBeboelse
+                  bygning
+                }
+              }
+            }
+          `,
+          variables: { adresseId: adresseIdLokalId },
+        },
+        { headers: { 'Content-Type': 'application/json' } }
+      );
+
+      const enhed = enhedResponse?.data?.data?.BBR_Enhed?.nodes?.[0];
+      if (!enhed) return { boligAreal: null, byggeaar: null };
+
+      const boligAreal = enhed.enh027ArealTilBeboelse ?? enhed.enh026EnhedensSamledeAreal ?? null;
+
+      // Hent byggeår fra den tilknyttede bygning
+      let byggeaar: number | null = null;
+      if (enhed.bygning) {
+        const bygningResponse = await this.http.post(
+          `https://graphql.datafordeler.dk/BBR/v3?apiKey=${apiKey}`,
+          {
+            query: `
+              query HentBygning($id: String!) {
+                BBR_Bygning(
+                  where: { id_lokalId: { eq: $id } }
+                  virkningstid: "2026-01-01T00:00:00Z"
+                  first: 1
+                ) {
+                  nodes { byg026Opfoerelsesaar }
+                }
+              }
+            `,
+            variables: { id: enhed.bygning },
+          },
+          { headers: { 'Content-Type': 'application/json' } }
+        );
+        byggeaar = bygningResponse?.data?.data?.BBR_Bygning?.nodes?.[0]?.byg026Opfoerelsesaar ?? null;
+      }
+
+      return { boligAreal, byggeaar };
+    } catch (error) {
+      console.error('Fejl ved BBR-enhed-opslag:', error);
+      return { boligAreal: null, byggeaar: null };
     }
   }
 
